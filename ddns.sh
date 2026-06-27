@@ -7,7 +7,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}======================================${NC}"
-echo -e "${GREEN}  Cloudflare 动态IP自动更新(DDNS)部署  ${NC}"
+echo -e "${GREEN} Cloudflare DDNS 全自动部署 (智能版) ${NC}"
 echo -e "${GREEN}======================================${NC}"
 
 # 检查是否为root用户
@@ -16,26 +16,26 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# 检查并安装 curl
-if ! command -v curl &> /dev/null; then
-    echo -e "${YELLOW}检测到未安装 curl，正在尝试安装...${NC}"
+# 检查并安装依赖 (curl 和 jq)
+if ! command -v curl &> /dev/null || ! command -v jq &> /dev/null; then
+    echo -e "${YELLOW}检测到缺少依赖 (curl 或 jq)，正在尝试安装...${NC}"
     if command -v apt-get &> /dev/null; then
-        apt-get update -y && apt-get install curl -y
+        apt-get update -y && apt-get install curl jq -y
     elif command -v yum &> /dev/null; then
-        yum install curl -y
+        yum install curl jq -y
     else
-        echo -e "${RED}无法自动安装 curl，请手动安装后重试！${NC}"
+        echo -e "${RED}无法自动安装依赖，请手动安装 curl 和 jq 后重试！${NC}"
         exit 1
     fi
 fi
 
-# 收集用户输入
-echo -e "\n${YELLOW}请按照提示输入 Cloudflare 的配置信息 (没有空格直接回车即可)：${NC}"
+echo -e "\n${RED}注意：运行前，请确保你已经在 CF 网页上手动添加了这条 A 记录！(随便填个IP即可)${NC}\n"
+
+# 收集用户输入 (不再需要 Record ID)
 read -p "1. 请输入 API Token: " CF_TOKEN
 read -p "2. 请输入 Zone ID: " CF_ZONE_ID
-read -p "3. 请输入 Record ID: " CF_RECORD_ID
-read -p "4. 请输入你的解析域名 (例如 ddns.example.com): " DOMAIN
-read -p "5. 是否开启 Cloudflare 代理(小黄云)? (输入 y 开启，其他任意键为仅DNS解析): " PROXIED_INPUT
+read -p "3. 请输入你的解析域名 (例如 ip4.yw358133117.top): " DOMAIN
+read -p "4. 是否开启 Cloudflare 代理(小黄云)? (输入 y 开启，其他任意键为仅DNS解析): " PROXIED_INPUT
 
 if [ "$PROXIED_INPUT" == "y" ] || [ "$PROXIED_INPUT" == "Y" ]; then
     PROXIED="true"
@@ -43,13 +43,38 @@ else
     PROXIED="false"
 fi
 
-# 验证输入是否为空
-if [ -z "$CF_TOKEN" ] || [ -z "$CF_ZONE_ID" ] || [ -z "$CF_RECORD_ID" ] || [ -z "$DOMAIN" ]; then
-    echo -e "${RED}错误：API Token、Zone ID、Record ID 和域名都不能为空！${NC}"
+if [ -z "$CF_TOKEN" ] || [ -z "$CF_ZONE_ID" ] || [ -z "$DOMAIN" ]; then
+    echo -e "${RED}错误：Token、Zone ID 和域名都不能为空！${NC}"
     exit 1
 fi
 
-echo -e "\n${YELLOW}正在生成核心脚本...${NC}"
+# ================= 自动获取 Record ID =================
+echo -e "\n${YELLOW}正在通过 API 自动查询 $DOMAIN 的 Record ID...${NC}"
+
+API_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?name=$DOMAIN" \
+     -H "Authorization: Bearer $CF_TOKEN" \
+     -H "Content-Type: application/json")
+
+# 检查 API 是否报错
+if echo "$API_RESPONSE" | jq -e '.success' > /dev/null 2>&1; then
+    # API调用成功，尝试提取ID
+    CF_RECORD_ID=$(echo "$API_RESPONSE" | jq -r '.result[0].id')
+    
+    if [ -z "$CF_RECORD_ID" ] || [ "$CF_RECORD_ID" == "null" ]; then
+        echo -e "${RED}查询失败：找不到域名 $DOMAIN 的记录！${NC}"
+        echo -e "${RED}请务必先去 Cloudflare 网页上手动添加这条 A 记录！${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✅ 成功获取到 Record ID: $CF_RECORD_ID${NC}"
+else
+    ERROR_MSG=$(echo "$API_RESPONSE" | jq -r '.errors[0].message')
+    echo -e "${RED}API 调用失败！错误信息: $ERROR_MSG${NC}"
+    echo -e "${RED}请检查你的 API Token 和 Zone ID 是否正确。${NC}"
+    exit 1
+fi
+# =======================================================
+
+echo -e "${YELLOW}正在生成核心守护脚本...${NC}"
 
 # 生成核心 DDNS 脚本
 cat << 'EOF' > /root/ddns_daemon.sh
@@ -86,7 +111,7 @@ else
 fi
 EOF
 
-# 使用 sed 替换脚本中的占位符
+# 注入变量
 sed -i "s|__TOKEN__|${CF_TOKEN}|g" /root/ddns_daemon.sh
 sed -i "s|__ZONE_ID__|${CF_ZONE_ID}|g" /root/ddns_daemon.sh
 sed -i "s|__RECORD_ID__|${CF_RECORD_ID}|g" /root/ddns_daemon.sh
@@ -96,34 +121,22 @@ sed -i "s|__PROXIED__|${PROXIED}|g" /root/ddns_daemon.sh
 chmod +x /root/ddns_daemon.sh
 
 echo -e "${YELLOW}正在设置定时任务...${NC}"
-
-# 移除旧的任务（如果有），并添加新任务（每5分钟执行一次 + 每天凌晨3点清空日志）
 (crontab -l 2>/dev/null | grep -v "ddns_daemon"; echo "*/5 * * * * /bin/bash /root/ddns_daemon.sh >> /root/ddns.log 2>&1"; echo "0 3 * * * echo "" > /root/ddns.log") | crontab -
 
-echo -e "${YELLOW}正在执行首次检测与同步...${NC}"
-# 首次执行，写入当前IP并验证API是否正确
+echo -e "${YELLOW}正在执行首次同步...${NC}"
 /bin/bash /root/ddns_daemon.sh
 
 if [ $? -eq 0 ]; then
     CURRENT_IP=$(cat /root/.current_ip.txt 2>/dev/null)
     echo -e "\n${GREEN}======================================${NC}"
-    echo -e "${GREEN}       🎉 部署成功！一切运行正常！     ${NC}"
+    echo -e "${GREEN}       🎉 部署大成功！一切自动搞定！     ${NC}"
     echo -e "${GREEN}======================================${NC}"
     echo -e "当前解析IP: ${GREEN}${CURRENT_IP}${NC}"
     echo -e "解析域名:   ${GREEN}${DOMAIN}${NC}"
-    echo -e "代理状态:   ${GREEN}$(if [ "$PROXIED" == "true" ]; then echo '已开启(小黄云)'; else echo '仅DNS(灰云)'; fi)${NC}"
+    echo -e "自动获取ID: ${GREEN}${CF_RECORD_ID}${NC}"
     echo -e "\n后续说明："
-    echo -e "1. 脚本已加入后台定时任务，每 5 分钟自动检查一次。"
-    echo -e "2. 换IP后最多等待 5 分钟，Cloudflare 即会自动切换。"
-    echo -e "3. 查看运行日志请输入: ${YELLOW}cat /root/ddns.log${NC}"
-    echo -e "4. 彻底卸载请输入: ${YELLOW}crontab -l | grep -v ddns_daemon | crontab - && rm -f /root/ddns_daemon.sh /root/ddns.log /root/.current_ip.txt${NC}"
+    echo -e "1. 脚本已后台静默运行，每 5 分钟自动检查并换IP。"
+    echo -e "2. 查看日志输入: ${YELLOW}cat /root/ddns.log${NC}"
 else
-    echo -e "\n${RED}======================================${NC}"
-    echo -e "${RED}       ❌ 首次运行失败，请检查配置！     ${NC}"
-    echo -e "${RED}======================================${NC}"
-    echo -e "常见失败原因："
-    echo -e "1. API Token 错误或权限不够（需要 Edit zone DNS 权限）。"
-    echo -e "2. Zone ID 或 Record ID 填错了。"
-    echo -e "3. 服务器当前网络无法连接到 Cloudflare。"
-    echo -e "\n你可以手动运行 ${YELLOW}/bin/bash /root/ddns_daemon.sh${NC} 来查看具体报错信息。"
+    echo -e "\n${RED}首次运行失败，请检查上方报错信息。${NC}"
 fi
