@@ -7,7 +7,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}======================================${NC}"
-echo -e "${GREEN} Cloudflare DDNS 全自动部署 (智能版) ${NC}"
+echo -e "${GREEN} Cloudflare DDNS 全自动部署 (最终版) ${NC}"
 echo -e "${GREEN}======================================${NC}"
 
 # 检查是否为root用户
@@ -31,10 +31,10 @@ fi
 
 echo -e "\n${RED}注意：运行前，请确保你已经在 CF 网页上手动添加了这条 A 记录！(随便填个IP即可)${NC}\n"
 
-# 收集用户输入 (不再需要 Record ID)
+# 收集用户输入
 read -p "1. 请输入 API Token: " CF_TOKEN
 read -p "2. 请输入 Zone ID: " CF_ZONE_ID
-read -p "3. 请输入你的解析域名 (例如 ip4.yw358133117.top): " DOMAIN
+read -p "3. 请输入你的解析域名 (例如 xx.xxxx.com): " DOMAIN
 read -p "4. 是否开启 Cloudflare 代理(小黄云)? (输入 y 开启，其他任意键为仅DNS解析): " PROXIED_INPUT
 
 if [ "$PROXIED_INPUT" == "y" ] || [ "$PROXIED_INPUT" == "Y" ]; then
@@ -55,9 +55,7 @@ API_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZO
      -H "Authorization: Bearer $CF_TOKEN" \
      -H "Content-Type: application/json")
 
-# 检查 API 是否报错
 if echo "$API_RESPONSE" | jq -e '.success' > /dev/null 2>&1; then
-    # API调用成功，尝试提取ID
     CF_RECORD_ID=$(echo "$API_RESPONSE" | jq -r '.result[0].id')
     
     if [ -z "$CF_RECORD_ID" ] || [ "$CF_RECORD_ID" == "null" ]; then
@@ -76,7 +74,7 @@ fi
 
 echo -e "${YELLOW}正在生成核心守护脚本...${NC}"
 
-# 生成核心 DDNS 脚本
+# 生成核心 DDNS 脚本 (已将 ip.sb 替换为更稳定的 ifconfig.me)
 cat << 'EOF' > /root/ddns_daemon.sh
 #!/bin/bash
 CF_TOKEN="__TOKEN__"
@@ -86,7 +84,7 @@ DOMAIN="__DOMAIN__"
 PROXIED="__PROXIED__"
 IP_FILE="/root/.current_ip.txt"
 
-NEW_IP=$(curl -s --connect-timeout 5 https://api.ip.sb/ip)
+NEW_IP=$(curl -4 -s --connect-timeout 10 https://ifconfig.me)
 
 if [ -z "$NEW_IP" ]; then
     exit 1
